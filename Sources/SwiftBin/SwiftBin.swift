@@ -48,7 +48,7 @@ public struct BinaryBuffer: ~Copyable {
             throw BinaryParsingNeedsMoreDataError()
         }
 
-        let value = pointer.withMemoryRebound(to: F.self, capacity: 1) { $0.pointee }
+        let value = UnsafeRawPointer(pointer).loadUnaligned(as: F.self)
         advance(by: size)
         return value
     }
