@@ -25,6 +25,10 @@ public struct BinaryBuffer: ~Copyable {
     internal var count: Int
     private let release: (() -> Void)?
 
+    public var isDrained: Bool {
+        count == 0
+    }
+
     public typealias ReleaseCallback = () -> Void
 
     public init(pointer: UnsafePointer<UInt8>, count: Int, release: ReleaseCallback?) {
@@ -33,12 +37,12 @@ public struct BinaryBuffer: ~Copyable {
         self.release = release
     }
 
-    private mutating func advance(by length: Int) {
+    public mutating func advance(by length: Int) {
         pointer += length
         count -= length
     }
 
-    internal mutating func readInteger<F: FixedWidthInteger>(_ type: F.Type = F.self) throws -> F {
+    public mutating func readInteger<F: FixedWidthInteger>(_ type: F.Type = F.self) throws -> F {
         let size = MemoryLayout<F>.size
         if count < size {
             throw BinaryParsingNeedsMoreDataError()
@@ -49,7 +53,7 @@ public struct BinaryBuffer: ~Copyable {
         return value
     }
 
-    internal mutating func readWithBuffer<T>(length: Int, parse: (inout BinaryBuffer) throws -> T) throws -> T {
+    public mutating func readWithBuffer<T>(length: Int, parse: (inout BinaryBuffer) throws -> T) throws -> T {
         guard count >= length else {
             throw BinaryParsingNeedsMoreDataError()
         }
@@ -60,13 +64,27 @@ public struct BinaryBuffer: ~Copyable {
         return value
     }
 
-    internal mutating func readString(length: Int) throws -> String {
+    @inlinable
+    public mutating func readLengthPrefixed<
+        LengthPrefix: FixedWidthInteger,
+        T
+    >(
+        lengthPrefix: LengthPrefix.Type = UInt32.self,
+        parse: (inout BinaryBuffer) throws -> T
+    ) throws -> T {
+        let bodySize = try readInteger(LengthPrefix.self)
+        return try readWithBuffer(length: Int(bodySize)) { slice in
+            return try parse(&slice)
+        }
+    }
+
+    public mutating func readString(length: Int) throws -> String {
         try readWithBuffer(length: length) { buffer in
             buffer.getString()
         }
     }
 
-    internal mutating func withConsumedBuffer<T>(
+    public mutating func withConsumedBuffer<T>(
         parse: (UnsafeBufferPointer<UInt8>) throws -> T
     ) rethrows -> T {
         let value = try parse(UnsafeBufferPointer(start: pointer, count: count))
@@ -74,7 +92,7 @@ public struct BinaryBuffer: ~Copyable {
         return value
     }
 
-    internal mutating func getString() -> String {
+    public mutating func getString() -> String {
         withConsumedBuffer { buffer in
             String(decoding: buffer, as: UTF8.self)
         }
@@ -113,6 +131,39 @@ public struct BinaryWriter: ~Copyable {
         let endianness = endianness ?? defaultEndianness
         let converted = endianness.convert(integer)
         try withUnsafeBytes(of: converted, write)
+    }
+
+    @inlinable
+    public mutating func writeLengthPrefixed<
+        LengthPrefix: FixedWidthInteger
+    >(
+        lengthPrefix: LengthPrefix.Type = UInt32.self,
+        write: (inout BinaryWriter) throws -> Void
+    ) throws {
+        let prefixSize = MemoryLayout<LengthPrefix>.size
+        var data = Data(repeating: 0x00, count: prefixSize)
+        var writer = BinaryWriter(defaultEndianness: defaultEndianness) { buffer in
+            let buffer = buffer.bindMemory(to: UInt8.self)
+            data.append(buffer.baseAddress!, count: buffer.count)
+        }
+        try write(&writer)
+        data.withUnsafeMutableBytes { buffer in
+            let payloadSize = LengthPrefix(buffer.count - prefixSize)
+            buffer.baseAddress!.assumingMemoryBound(to: LengthPrefix.self).pointee = payloadSize
+        }
+    }
+
+    @inlinable
+    public mutating func writeLengthPrefixed<
+        LengthPrefix: FixedWidthInteger,
+        Value: BinaryFormatProtocol
+    >(
+        lengthPrefix: LengthPrefix.Type = UInt32.self,
+        value: Value
+    ) throws {
+        try writeLengthPrefixed(lengthPrefix: LengthPrefix.self) { writer in
+            try value.serialize(into: &writer)
+        }
     }
 
     @inlinable

@@ -65,6 +65,7 @@ public struct BinaryEnumMacro: MemberMacro, ExtensionMacro {
         providingMembersOf declaration: some DeclGroupSyntax,
         in context: some MacroExpansionContext
     ) throws -> [DeclSyntax] {
+        let isFrozen = !node.description.contains("OpenBinaryEnum")
         guard declaration.is(EnumDeclSyntax.self) else {
             throw Error.notAnEnum
         }
@@ -104,17 +105,49 @@ public struct BinaryEnumMacro: MemberMacro, ExtensionMacro {
         }
 
         let parseStatements = enumCases.map { enumCase in
-            return """
-            case .\(enumCase.name):
-                self = .\(enumCase.name)\(enumCase.parseParameters)
-            """
+            if enumCase.memberCount == 0 {
+                return """
+                case .\(enumCase.name):
+                    self = .\(enumCase.name)
+                    try buffer.readLengthPrefixed { _ in }
+                """
+            } else {
+                return """
+                case .\(enumCase.name):
+                    self = try buffer.readLengthPrefixed { buffer in
+                        .\(enumCase.name)\(enumCase.parseParameters)
+                    }
+                """
+            }
         }
 
         let serializeStatements = enumCases.map { enumCase in
+            if enumCase.memberCount == 0 {
+                return """
+                case .\(enumCase.name)\(enumCase.captureParameters):
+                    try Marker.\(enumCase.name).serialize(into: &writer)
+                    try writer.writeLengthPrefixed { _ in }
+                """
+            } else {
+                return """
+                case .\(enumCase.name)\(enumCase.captureParameters):
+                    try Marker.\(enumCase.name).serialize(into: &writer)
+                    try writer.writeLengthPrefixed { writer in
+                        \(enumCase.captureParametersSerializeStatements.joined(separator: "\n"))
+                    }
+                """
+            }
+        }
+
+        let parseMarker: String
+
+        if isFrozen {
+            parseMarker = """
+            let marker = try Marker(consuming: &buffer)
             """
-            case .\(enumCase.name)\(enumCase.captureParameters):
-                try Marker.\(enumCase.name).serialize(into: &writer)
-                \(enumCase.captureParametersSerializeStatements.joined(separator: "\n"))
+        } else {
+            parseMarker = """
+            let marker = (try? Marker(consuming: &buffer)) ?? .unknown
             """
         }
 
@@ -126,7 +159,8 @@ public struct BinaryEnumMacro: MemberMacro, ExtensionMacro {
             """,
             """
             init(consuming buffer: inout BinaryBuffer) throws {
-                switch try Marker(consuming: &buffer) {
+                \(raw: parseMarker)
+                switch marker {
                     \(raw: parseStatements.joined(separator: "\n"))
                 }
             }
