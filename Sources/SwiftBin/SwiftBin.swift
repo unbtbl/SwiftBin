@@ -147,9 +147,10 @@ public struct BinaryWriter: ~Copyable {
             data.append(buffer.baseAddress!, count: buffer.count)
         }
         try write(&writer)
-        data.withUnsafeMutableBytes { buffer in
+        try data.withUnsafeMutableBytes { buffer in
             let payloadSize = LengthPrefix(buffer.count - prefixSize)
             buffer.baseAddress!.assumingMemoryBound(to: LengthPrefix.self).pointee = payloadSize
+            try self.write(UnsafeRawBufferPointer(buffer))
         }
     }
 
