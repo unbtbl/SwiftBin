@@ -9,7 +9,7 @@ public macro BinaryFormat() = #externalMacro(module: "SwiftBinMacros", type: "Bi
 public macro BinaryEnum() = #externalMacro(module: "SwiftBinMacros", type: "BinaryEnumMacro")
 
 @attached(member, names: named(init), named(serialize), named(Marker))
-@attached(extension, conformances: BinaryNonFrozenEnumProtocol)
+@attached(extension, conformances: NonFrozenBinaryEnumProtocol)
 public macro OpenBinaryEnum() = #externalMacro(module: "SwiftBinMacros", type: "BinaryEnumMacro")
 
 public enum BinarySerializationError: Error {
@@ -17,7 +17,7 @@ public enum BinarySerializationError: Error {
 }
 
 public enum BinaryParsingError: Error {
-    case invalidOrUnknownEnumValue
+    case invalidOrUnknownEnumValue, invalidUTF8
 }
 
 public struct BinaryBuffer: ~Copyable {
@@ -199,41 +199,32 @@ public protocol BinaryEnumProtocol: BinaryFormatProtocol {
 //    associatedtype Marker: RawRepresentable where Marker.RawValue: FixedWidthInteger
 }
 
-public protocol BinaryNonFrozenEnumProtocol: BinaryEnumProtocol {
+public protocol NonFrozenBinaryEnumProtocol: BinaryEnumProtocol {
     static var unknown: Self { get }
 }
 
 public protocol BinaryFormatWithLength: BinaryFormatProtocol {
     var byteSize: Int { get }
+
+    init(consumingWithoutLength buffer: inout BinaryBuffer) throws
+    func serializeWithoutLength(into writer: inout BinaryWriter) throws
 }
 
-@propertyWrapper public struct LengthEncoded<Length: FixedWidthInteger, Value: BinaryFormatWithLength>: BinaryFormatProtocol {
-    public var wrappedValue: Value
-    public var projectedValue: Self { self }
-    public init(wrappedValue: Value) {
-        self.wrappedValue = wrappedValue
-    }
-
+extension BinaryFormatWithLength {
     public init(consuming buffer: inout BinaryBuffer) throws {
-        let length = try Int(buffer.readInteger(Length.self))
+        let length = try Int(buffer.readInteger(Int.self))
         guard buffer.count >= length else {
             throw BinaryParsingNeedsMoreDataError()
         }
 
-        self.wrappedValue = try buffer.readWithBuffer(length: length) { buffer in
-            try Value(consuming: &buffer)
+        self = try buffer.readWithBuffer(length: length) { buffer in
+            try Self(consumingWithoutLength: &buffer)
         }
     }
 
     public func serialize(into writer: inout BinaryWriter) throws {
-        let byteSize = wrappedValue.byteSize
-
-        guard byteSize <= Length.max else {
-            throw BinarySerializationError.lengthDoesNotFit
-        }
-
-        try writer.writeInteger(Length(byteSize))
-        try wrappedValue.serialize(into: &writer)
+        try writer.writeInteger(byteSize)
+        try serializeWithoutLength(into: &writer)
     }
 }
 
@@ -293,11 +284,41 @@ extension Float: BinaryFormatProtocol {
     }
 }
 
+extension Array: BinaryFormatProtocol where Element: BinaryFormatProtocol {
+    public init(consuming buffer: inout BinaryBuffer) throws {
+        let count: Int = try buffer.readInteger()
+        var elements = [Element]()
+        for _ in 0..<count {
+            elements.append(try Element(consuming: &buffer))
+        }
+        self = elements
+    }
+
+    public func serialize(into writer: inout BinaryWriter) throws {
+        try writer.writeInteger(count)
+        for element in self {
+            try element.serialize(into: &writer)
+        }
+    }
+}
+
+extension String: BinaryFormatWithLength {
+    public var byteSize: Int { utf8.count }
+    public func serializeWithoutLength(into writer: inout BinaryWriter) throws {
+        try writer.writeString(self)
+    }
+
+    public init(consumingWithoutLength buffer: inout BinaryBuffer) throws {
+        self = try buffer.readString(length: buffer.count)
+    }
+}
+
+#if canImport(Foundation)
 import Foundation
 
 extension Data: BinaryFormatWithLength {
     public var byteSize: Int { count }
-    public func serialize(into writer: inout BinaryWriter) throws {
+    public func serializeWithoutLength(into writer: inout BinaryWriter) throws {
         try withUnsafeBytes { buffer in
             try writer.writeBytes(
                 buffer.baseAddress!.assumingMemoryBound(to: UInt8.self),
@@ -306,9 +327,55 @@ extension Data: BinaryFormatWithLength {
         }
     }
 
-    public init(consuming buffer: inout BinaryBuffer) throws {
+    public init(consumingWithoutLength buffer: inout BinaryBuffer) throws {
         self = buffer.withConsumedBuffer { buffer in
             Data(bytes: buffer.baseAddress!, count: buffer.count)
         }
     }
 }
+
+extension BinaryBuffer {
+    public static func readContents<T>(
+        ofData data: Data,
+        parse: (inout BinaryBuffer) throws -> T
+    ) rethrows -> T {
+        try data.withUnsafeBytes { buffer in
+            let buffer = buffer.bindMemory(to: UInt8.self)
+            var binary = BinaryBuffer(
+                pointer: buffer.baseAddress!,
+                count: buffer.count,
+                release: nil
+            )
+
+            return try parse(&binary)
+        }
+    }
+}
+
+extension BinaryFormatProtocol {
+    public init(parseFrom data: Data) throws {
+        self = try BinaryBuffer.readContents(ofData: data) { buffer in
+            try Self(consuming: &buffer)
+        }
+    }
+
+    public func writeData() throws -> Data {
+        var data = Data()
+        data.reserveCapacity(4096)
+        try write(into: &data)
+        return data
+    }
+
+    public func write(into data: inout Data) throws {
+        var writeBuffer = data
+        var writer = BinaryWriter(
+            defaultEndianness: .big
+        ) { dataToWrite in
+            writeBuffer.append(dataToWrite.bindMemory(to: UInt8.self))
+        }
+        try serialize(into: &writer)
+    
+        data = writeBuffer
+    }
+}
+#endif

@@ -53,7 +53,7 @@ public struct BinaryEnumMacro: MemberMacro, ExtensionMacro {
             case .notAnEnum:
                 return "Type is not an enum"
             case .unsupportedEnumCasesCount:
-                return "BinaryEnum supports only \(UInt8.max) cases per enum"
+                return "BinaryEnum supports only \(UInt16.max) cases per enum"
             }
         }
     }
@@ -96,7 +96,7 @@ public struct BinaryEnumMacro: MemberMacro, ExtensionMacro {
             }
         }
 
-        if enumCases.count > Int(UInt8.max) {
+        if enumCases.count > Int(UInt16.max) {
             throw Error.unsupportedEnumCasesCount
         }
 
@@ -153,7 +153,7 @@ public struct BinaryEnumMacro: MemberMacro, ExtensionMacro {
 
         return [
             """
-            public enum Marker: UInt8, Hashable, BinaryFormatProtocol {
+            public enum Marker: UInt16, Hashable, BinaryFormatProtocol {
                 \(raw: markerCases.joined(separator: "\n"))
             }
             """,
