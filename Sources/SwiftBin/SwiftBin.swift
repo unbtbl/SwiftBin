@@ -22,29 +22,34 @@ public enum BinaryParsingError: Error {
 
 public struct BinaryBuffer: ~Copyable {
     internal var pointer: UnsafePointer<UInt8>
-    internal var count: Int
+    let total: Int
+    public var consumed: Int {
+        total - remaining
+    }
+    internal var remaining: Int
     private let release: (() -> Void)?
 
     public var isDrained: Bool {
-        count == 0
+        remaining == 0
     }
 
     public typealias ReleaseCallback = () -> Void
 
     public init(pointer: UnsafePointer<UInt8>, count: Int, release: ReleaseCallback?) {
         self.pointer = pointer
-        self.count = count
+        self.total = count
+        self.remaining = count
         self.release = release
     }
 
     public mutating func advance(by length: Int) {
         pointer += length
-        count -= length
+        remaining -= length
     }
 
     public mutating func readInteger<F: FixedWidthInteger>(_ type: F.Type = F.self) throws -> F {
         let size = MemoryLayout<F>.size
-        if count < size {
+        if remaining < size {
             throw BinaryParsingNeedsMoreDataError()
         }
 
@@ -54,7 +59,7 @@ public struct BinaryBuffer: ~Copyable {
     }
 
     public mutating func readWithBuffer<T>(length: Int, parse: (inout BinaryBuffer) throws -> T) throws -> T {
-        guard count >= length else {
+        guard remaining >= length else {
             throw BinaryParsingNeedsMoreDataError()
         }
 
@@ -87,8 +92,8 @@ public struct BinaryBuffer: ~Copyable {
     public mutating func withConsumedBuffer<T>(
         parse: (UnsafeBufferPointer<UInt8>) throws -> T
     ) rethrows -> T {
-        let value = try parse(UnsafeBufferPointer(start: pointer, count: count))
-        advance(by: count)
+        let value = try parse(UnsafeBufferPointer(start: pointer, count: remaining))
+        advance(by: remaining)
         return value
     }
 
@@ -213,7 +218,7 @@ public protocol BinaryFormatWithLength: BinaryFormatProtocol {
 extension BinaryFormatWithLength {
     public init(consuming buffer: inout BinaryBuffer) throws {
         let length = try Int(buffer.readInteger(Int.self))
-        guard buffer.count >= length else {
+        guard buffer.remaining >= length else {
             throw BinaryParsingNeedsMoreDataError()
         }
 
@@ -309,7 +314,7 @@ extension String: BinaryFormatWithLength {
     }
 
     public init(consumingWithoutLength buffer: inout BinaryBuffer) throws {
-        self = try buffer.readString(length: buffer.count)
+        self = try buffer.readString(length: buffer.remaining)
     }
 }
 
