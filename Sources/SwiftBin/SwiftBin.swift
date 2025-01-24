@@ -35,6 +35,17 @@ public struct BinaryBuffer: ~Copyable {
 
     public typealias ReleaseCallback = () -> Void
 
+    public mutating func withResetOnFailure<T>(_ body: (inout BinaryBuffer) throws -> T) -> T? {
+        let originalConsumed = consumed
+
+        do {
+            return try body(&self)
+        } catch {
+            self.advance(by: originalConsumed - consumed)
+            return nil
+        }
+    }
+
     public init(pointer: UnsafePointer<UInt8>, count: Int, release: ReleaseCallback?) {
         self.pointer = pointer
         self.total = count
