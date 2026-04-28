@@ -44,6 +44,18 @@ struct EnumCase {
     }
 }
 
+private func conformanceExtensions(
+    for type: some TypeSyntaxProtocol,
+    protocols: [TypeSyntax]
+) -> [ExtensionDeclSyntax] {
+    protocols.compactMap { `protocol` in
+        let declaration: DeclSyntax = """
+        extension \(type.trimmed): \(`protocol`) {}
+        """
+        return declaration.as(ExtensionDeclSyntax.self)
+    }
+}
+
 public struct BinaryEnumMacro: MemberMacro, ExtensionMacro {
     enum Error: Swift.Error, CustomDebugStringConvertible {
         case notAnEnum, unsupportedEnumCasesCount
@@ -63,9 +75,10 @@ public struct BinaryEnumMacro: MemberMacro, ExtensionMacro {
     public static func expansion(
         of node: AttributeSyntax,
         providingMembersOf declaration: some DeclGroupSyntax,
+        conformingTo protocols: [TypeSyntax],
         in context: some MacroExpansionContext
     ) throws -> [DeclSyntax] {
-        let isFrozen = !node.description.contains("OpenBinaryEnum")
+        let isFrozen = node.attributeName.description != "OpenBinaryEnum"
         guard declaration.is(EnumDeclSyntax.self) else {
             throw Error.notAnEnum
         }
@@ -175,8 +188,14 @@ public struct BinaryEnumMacro: MemberMacro, ExtensionMacro {
         ]
     }
 
-    public static func expansion(of node: AttributeSyntax, attachedTo declaration: some DeclGroupSyntax, providingExtensionsOf type: some TypeSyntaxProtocol, conformingTo protocols: [TypeSyntax], in context: some MacroExpansionContext) throws -> [ExtensionDeclSyntax] {
-        []
+    public static func expansion(
+        of node: AttributeSyntax,
+        attachedTo declaration: some DeclGroupSyntax,
+        providingExtensionsOf type: some TypeSyntaxProtocol,
+        conformingTo protocols: [TypeSyntax],
+        in context: some MacroExpansionContext
+    ) throws -> [ExtensionDeclSyntax] {
+        conformanceExtensions(for: type, protocols: protocols)
     }
 }
 
@@ -186,6 +205,7 @@ public struct BinaryFormatMacro: MemberMacro, ExtensionMacro {
     public static func expansion(
         of node: AttributeSyntax,
         providingMembersOf declaration: some DeclGroupSyntax,
+        conformingTo protocols: [TypeSyntax],
         in context: some MacroExpansionContext
     ) throws -> [DeclSyntax] {
         let memberList = declaration.memberBlock.members
@@ -234,8 +254,14 @@ public struct BinaryFormatMacro: MemberMacro, ExtensionMacro {
         ]
     }
     
-    public static func expansion(of node: AttributeSyntax, attachedTo declaration: some DeclGroupSyntax, providingExtensionsOf type: some TypeSyntaxProtocol, conformingTo protocols: [TypeSyntax], in context: some MacroExpansionContext) throws -> [ExtensionDeclSyntax] {
-        []
+    public static func expansion(
+        of node: AttributeSyntax,
+        attachedTo declaration: some DeclGroupSyntax,
+        providingExtensionsOf type: some TypeSyntaxProtocol,
+        conformingTo protocols: [TypeSyntax],
+        in context: some MacroExpansionContext
+    ) throws -> [ExtensionDeclSyntax] {
+        conformanceExtensions(for: type, protocols: protocols)
     }
 }
 
