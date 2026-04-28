@@ -44,6 +44,27 @@ struct EnumCase {
     }
 }
 
+private func accessPrefix(for declaration: some DeclGroupSyntax) -> String {
+    let modifiers: DeclModifierListSyntax
+    if let structDeclaration = declaration.as(StructDeclSyntax.self) {
+        modifiers = structDeclaration.modifiers
+    } else if let enumDeclaration = declaration.as(EnumDeclSyntax.self) {
+        modifiers = enumDeclaration.modifiers
+    } else if let classDeclaration = declaration.as(ClassDeclSyntax.self) {
+        modifiers = classDeclaration.modifiers
+    } else if let actorDeclaration = declaration.as(ActorDeclSyntax.self) {
+        modifiers = actorDeclaration.modifiers
+    } else {
+        return ""
+    }
+
+    if modifiers.contains(where: { $0.name.text == "public" || $0.name.text == "open" }) {
+        return "public "
+    }
+
+    return ""
+}
+
 private func conformanceExtensions(
     for type: some TypeSyntaxProtocol,
     protocols: [TypeSyntax]
@@ -152,6 +173,7 @@ public struct BinaryEnumMacro: MemberMacro, ExtensionMacro {
             }
         }
 
+        let access = accessPrefix(for: declaration)
         let parseMarker: String
 
         if isFrozen {
@@ -160,18 +182,25 @@ public struct BinaryEnumMacro: MemberMacro, ExtensionMacro {
             """
         } else {
             parseMarker = """
-            let marker = (try? Marker(consuming: &buffer)) ?? .unknown
+            let markerValue = try UInt16(consuming: &buffer)
+            guard let marker = Marker(rawValue: markerValue) else {
+                try buffer.readLengthPrefixed { payload in
+                    payload.skipRemaining()
+                }
+                self = Self.unknown
+                return
+            }
             """
         }
 
         return [
             """
-            public enum Marker: UInt16, Hashable, BinaryFormatProtocol {
+            \(raw: access)enum Marker: UInt16, Hashable, BinaryFormatProtocol {
                 \(raw: markerCases.joined(separator: "\n"))
             }
             """,
             """
-            init(consuming buffer: inout BinaryBuffer) throws {
+            \(raw: access)init(consuming buffer: inout BinaryBuffer) throws {
                 \(raw: parseMarker)
                 switch marker {
                     \(raw: parseStatements.joined(separator: "\n"))
@@ -179,7 +208,7 @@ public struct BinaryEnumMacro: MemberMacro, ExtensionMacro {
             }
             """,
             """
-            func serialize(into writer: inout BinaryWriter) throws {
+            \(raw: access)func serialize(into writer: inout BinaryWriter) throws {
                 switch self {
                     \(raw: serializeStatements.joined(separator: "\n"))
                 }
@@ -210,28 +239,33 @@ public struct BinaryFormatMacro: MemberMacro, ExtensionMacro {
     ) throws -> [DeclSyntax] {
         let memberList = declaration.memberBlock.members
 
-        let properties = memberList.compactMap { member -> String? in
+        let properties = memberList.flatMap { member -> [String] in
             guard
-                let propertyName = member
+                let variable = member
                     .decl
-                    .as(VariableDeclSyntax.self)?
-                    .bindings
-                    .first?
+                    .as(VariableDeclSyntax.self)
+            else {
+                return []
+            }
+
+            if variable.modifiers.contains(where: { $0.name.text == "static" || $0.name.text == "class" || $0.name.text == "lazy" }) {
+                return []
+            }
+
+            return variable.bindings.compactMap { binding in
+                guard binding.accessorBlock == nil else {
+                    return nil
+                }
+
+                return binding
                     .pattern
                     .as(IdentifierPatternSyntax.self)?
                     .identifier
                     .text
-            else {
-                return nil
-            }
-
-            if member.decl.as(VariableDeclSyntax.self)?.attributes.isEmpty == false {
-                return "_" + propertyName
-            } else {
-                return propertyName
             }
         }
 
+        let access = accessPrefix(for: declaration)
         let parseStatements = properties.map { property in
             "self.\(property) = try .init(consuming: &buffer)"
         }
@@ -242,12 +276,12 @@ public struct BinaryFormatMacro: MemberMacro, ExtensionMacro {
 
         return [
             """
-            init(consuming buffer: inout BinaryBuffer) throws {
+            \(raw: access)init(consuming buffer: inout BinaryBuffer) throws {
                 \(raw: parseStatements.joined(separator: "\n"))
             }
             """,
             """
-            func serialize(into writer: inout BinaryWriter) throws {
+            \(raw: access)func serialize(into writer: inout BinaryWriter) throws {
                 \(raw: serializeStatements.joined(separator: "\n"))
             }
             """

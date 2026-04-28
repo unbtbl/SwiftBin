@@ -7,7 +7,8 @@ import CompilerPluginSupport
 let package = Package(
     name: "SwiftBin",
     platforms: [
-        .macOS(.v10_15),
+        .iOS(.v17),
+        .macOS(.v13),
     ],
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.

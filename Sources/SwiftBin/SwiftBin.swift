@@ -17,12 +17,13 @@ public enum BinarySerializationError: Error {
 }
 
 public enum BinaryParsingError: Error {
-    case invalidOrUnknownEnumValue, invalidUTF8
+    case invalidLength, invalidOrUnknownEnumValue, invalidUTF8, trailingData
 }
 
 public struct BinaryBuffer: ~Copyable {
     internal var pointer: UnsafePointer<UInt8>
     let total: Int
+    public let defaultEndianness: Endianness
     public var consumed: Int {
         total - remaining
     }
@@ -35,48 +36,96 @@ public struct BinaryBuffer: ~Copyable {
 
     public typealias ReleaseCallback = () -> Void
 
+    private static var emptyPointer: UnsafePointer<UInt8> {
+        UnsafePointer(bitPattern: 1)!
+    }
+
     public mutating func withResetOnFailure<T>(_ body: (inout BinaryBuffer) throws -> T) -> T? {
         let originalConsumed = consumed
 
         do {
             return try body(&self)
         } catch {
-            self.advance(by: originalConsumed - consumed)
+            moveUnchecked(by: originalConsumed - consumed)
             return nil
         }
     }
 
     public init(pointer: UnsafePointer<UInt8>, count: Int, release: ReleaseCallback?) {
+        self.init(
+            pointer: pointer,
+            count: count,
+            defaultEndianness: .big,
+            release: release
+        )
+    }
+
+    public init(
+        pointer: UnsafePointer<UInt8>,
+        count: Int,
+        defaultEndianness: Endianness,
+        release: ReleaseCallback?
+    ) {
         self.pointer = pointer
         self.total = count
         self.remaining = count
+        self.defaultEndianness = defaultEndianness
         self.release = release
     }
 
-    public mutating func advance(by length: Int) {
+    public mutating func advance(by length: Int) throws {
+        guard length >= 0, remaining >= length else {
+            throw BinaryParsingNeedsMoreDataError()
+        }
+
+        moveUnchecked(by: length)
+    }
+
+    public mutating func skipRemaining() {
+        moveUnchecked(by: remaining)
+    }
+
+    private mutating func moveUnchecked(by length: Int) {
         pointer += length
         remaining -= length
     }
 
-    public mutating func readInteger<F: FixedWidthInteger>(_ type: F.Type = F.self) throws -> F {
+    public mutating func readInteger<F: FixedWidthInteger>(
+        _ type: F.Type = F.self,
+        endianness: Endianness? = nil
+    ) throws -> F {
         let size = MemoryLayout<F>.size
         if remaining < size {
             throw BinaryParsingNeedsMoreDataError()
         }
 
         let value = UnsafeRawPointer(pointer).loadUnaligned(as: F.self)
-        advance(by: size)
-        return value
+        moveUnchecked(by: size)
+        let endianness = endianness ?? defaultEndianness
+        return endianness.convertFromStorage(value)
     }
 
-    public mutating func readWithBuffer<T>(length: Int, parse: (inout BinaryBuffer) throws -> T) throws -> T {
-        guard remaining >= length else {
+    public mutating func readWithBuffer<T>(
+        length: Int,
+        allowingTrailingBytes: Bool = false,
+        parse: (inout BinaryBuffer) throws -> T
+    ) throws -> T {
+        guard length >= 0, remaining >= length else {
             throw BinaryParsingNeedsMoreDataError()
         }
 
-        var buffer = BinaryBuffer(pointer: pointer, count: length, release: nil)
+        var buffer = BinaryBuffer(
+            pointer: pointer,
+            count: length,
+            defaultEndianness: defaultEndianness,
+            release: nil
+        )
         let value = try parse(&buffer)
-        advance(by: length)
+        guard allowingTrailingBytes || buffer.isDrained else {
+            throw BinaryParsingError.trailingData
+        }
+
+        moveUnchecked(by: length)
         return value
     }
 
@@ -86,17 +135,22 @@ public struct BinaryBuffer: ~Copyable {
         T
     >(
         lengthPrefix: LengthPrefix.Type = UInt32.self,
+        allowingTrailingBytes: Bool = false,
         parse: (inout BinaryBuffer) throws -> T
     ) throws -> T {
         let bodySize = try readInteger(LengthPrefix.self)
-        return try readWithBuffer(length: Int(bodySize)) { slice in
+        guard let length = Int(exactly: bodySize), length >= 0 else {
+            throw BinaryParsingError.invalidLength
+        }
+
+        return try readWithBuffer(length: length, allowingTrailingBytes: allowingTrailingBytes) { slice in
             return try parse(&slice)
         }
     }
 
     public mutating func readString(length: Int) throws -> String {
         try readWithBuffer(length: length) { buffer in
-            buffer.getString()
+            try buffer.getString()
         }
     }
 
@@ -104,13 +158,17 @@ public struct BinaryBuffer: ~Copyable {
         parse: (UnsafeBufferPointer<UInt8>) throws -> T
     ) rethrows -> T {
         let value = try parse(UnsafeBufferPointer(start: pointer, count: remaining))
-        advance(by: remaining)
+        moveUnchecked(by: remaining)
         return value
     }
 
-    public mutating func getString() -> String {
-        withConsumedBuffer { buffer in
-            String(decoding: buffer, as: UTF8.self)
+    public mutating func getString() throws -> String {
+        try withConsumedBuffer { buffer in
+            guard let string = String(bytes: buffer, encoding: .utf8) else {
+                throw BinaryParsingError.invalidUTF8
+            }
+
+            return string
         }
     }
 
@@ -125,6 +183,14 @@ public enum Endianness {
         switch self {
         case .little: return integer.littleEndian
         case .big: return integer.bigEndian
+        }
+    }
+
+    @inlinable
+    internal func convertFromStorage<F: FixedWidthInteger>(_ integer: F) -> F {
+        switch self {
+        case .little: return F(littleEndian: integer)
+        case .big: return F(bigEndian: integer)
         }
     }
 }
@@ -156,17 +222,22 @@ public struct BinaryWriter: ~Copyable {
         lengthPrefix: LengthPrefix.Type = UInt32.self,
         write: (inout BinaryWriter) throws -> Void
     ) throws {
-        let prefixSize = MemoryLayout<LengthPrefix>.size
-        var data = Data(repeating: 0x00, count: prefixSize)
+        var data = Data()
         var writer = BinaryWriter(defaultEndianness: defaultEndianness) { buffer in
+            guard !buffer.isEmpty else { return }
             let buffer = buffer.bindMemory(to: UInt8.self)
             data.append(buffer.baseAddress!, count: buffer.count)
         }
         try write(&writer)
-        try data.withUnsafeMutableBytes { buffer in
-            let payloadSize = LengthPrefix(buffer.count - prefixSize)
-            buffer.baseAddress!.assumingMemoryBound(to: LengthPrefix.self).pointee = payloadSize
-            try self.write(UnsafeRawBufferPointer(buffer))
+        guard let payloadSize = LengthPrefix(exactly: data.count) else {
+            throw BinarySerializationError.lengthDoesNotFit
+        }
+
+        try writeInteger(payloadSize)
+        if !data.isEmpty {
+            try data.withUnsafeBytes { buffer in
+                try self.write(buffer)
+            }
         }
     }
 
@@ -185,12 +256,17 @@ public struct BinaryWriter: ~Copyable {
 
     @inlinable
     public mutating func writeBytes(_ pointer: UnsafePointer<UInt8>, size: Int) throws {
+        guard size > 0 else { return }
         try write(UnsafeRawBufferPointer(start: pointer, count: size))
     }
 
     @inlinable
     public mutating func writeString(_ string: String) throws {
-        try writeBytes(string, size: string.utf8.count)
+        let bytes = Array(string.utf8)
+        try bytes.withUnsafeBufferPointer { buffer in
+            guard let baseAddress = buffer.baseAddress else { return }
+            try writeBytes(baseAddress, size: buffer.count)
+        }
     }
 }
 
@@ -229,6 +305,10 @@ public protocol BinaryFormatWithLength: BinaryFormatProtocol {
 extension BinaryFormatWithLength {
     public init(consuming buffer: inout BinaryBuffer) throws {
         let length = try Int(buffer.readInteger(Int.self))
+        guard length >= 0 else {
+            throw BinaryParsingError.invalidLength
+        }
+
         guard buffer.remaining >= length else {
             throw BinaryParsingNeedsMoreDataError()
         }
@@ -303,6 +383,10 @@ extension Float: BinaryFormatProtocol {
 extension Array: BinaryFormatProtocol where Element: BinaryFormatProtocol {
     public init(consuming buffer: inout BinaryBuffer) throws {
         let count: Int = try buffer.readInteger()
+        guard count >= 0 else {
+            throw BinaryParsingError.invalidLength
+        }
+
         var elements = [Element]()
         for _ in 0..<count {
             elements.append(try Element(consuming: &buffer))
@@ -336,8 +420,9 @@ extension Data: BinaryFormatWithLength {
     public var byteSize: Int { count }
     public func serializeWithoutLength(into writer: inout BinaryWriter) throws {
         try withUnsafeBytes { buffer in
+            guard let baseAddress = buffer.baseAddress else { return }
             try writer.writeBytes(
-                buffer.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                baseAddress.assumingMemoryBound(to: UInt8.self),
                 size: buffer.count
             )
         }
@@ -345,7 +430,11 @@ extension Data: BinaryFormatWithLength {
 
     public init(consumingWithoutLength buffer: inout BinaryBuffer) throws {
         self = buffer.withConsumedBuffer { buffer in
-            Data(bytes: buffer.baseAddress!, count: buffer.count)
+            guard let baseAddress = buffer.baseAddress else {
+                return Data()
+            }
+
+            return Data(bytes: baseAddress, count: buffer.count)
         }
     }
 }
@@ -355,11 +444,24 @@ extension BinaryBuffer {
         ofData data: Data,
         parse: (inout BinaryBuffer) throws -> T
     ) rethrows -> T {
+        try readContents(
+            ofData: data,
+            defaultEndianness: .big,
+            parse: parse
+        )
+    }
+
+    public static func readContents<T>(
+        ofData data: Data,
+        defaultEndianness: Endianness,
+        parse: (inout BinaryBuffer) throws -> T
+    ) rethrows -> T {
         try data.withUnsafeBytes { buffer in
             let buffer = buffer.bindMemory(to: UInt8.self)
             var binary = BinaryBuffer(
-                pointer: buffer.baseAddress!,
+                pointer: buffer.baseAddress ?? BinaryBuffer.emptyPointer,
                 count: buffer.count,
+                defaultEndianness: defaultEndianness,
                 release: nil
             )
 
@@ -369,9 +471,14 @@ extension BinaryBuffer {
 }
 
 extension BinaryFormatProtocol {
-    public init(parseFrom data: Data) throws {
-        self = try BinaryBuffer.readContents(ofData: data) { buffer in
-            try Self(consuming: &buffer)
+    public init(parseFrom data: Data, endianness: Endianness = .big) throws {
+        self = try BinaryBuffer.readContents(ofData: data, defaultEndianness: endianness) { buffer in
+            let value = try Self(consuming: &buffer)
+            guard buffer.isDrained else {
+                throw BinaryParsingError.trailingData
+            }
+
+            return value
         }
     }
 
