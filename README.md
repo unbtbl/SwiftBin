@@ -40,7 +40,7 @@ let parsedSession = try UserSession(parseFrom: data)
 
 ## Bring your own types!
 
-SwiftNIO is used on the Server, and who knows what's next! Types are serialized into a `BinaryWriter`. You can create your own BinaryWriter that sends the data over a socket, into SwiftNIO ByteBuffer or writes it to the FileSystem.
+Types are serialized into a `BinaryWriter`. You can create your own BinaryWriter that sends the data over a socket, into SwiftNIO ByteBuffer or writes it to the FileSystem.
 
 ```swift
 var writer = BinaryWriter { data in
